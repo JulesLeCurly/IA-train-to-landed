@@ -43,6 +43,11 @@ class Phys_Engine:
         # Victory conditions
         self.MAX_LANDING_SPEED = self.Env_Config["MAX_LANDING_SPEED"]  # m/s
         self.LANDING_ANGLE_TOLERANCE = self.Env_Config["LANDING_ANGLE_TOLERANCE"]  # degrees from vertical
+
+        self.GROUND_LEVEL = self.Env_Config["GROUND_LEVEL"]
+        self.Max_rotation = self.Env_Config["Max_rotation"]
+        self.Max_trust = self.Env_Config["Max_trust"]
+        self.Max_width = self.Env_Config["Max_width"]
     
     def _allocate_memory(self):
         """Alloue les tenseurs d'état vivants en 1D compact (Parallel_Scenarios,)."""
@@ -60,6 +65,8 @@ class Phys_Engine:
         self.velocity_y = torch.zeros(n, dtype=torch.float32, device=dev)
         
         self.rotation = torch.zeros(n, dtype=torch.float32, device=dev)
+
+        self.alive = torch.zeros(n, dtype=torch.int8, device=dev)
     
     def reset(self, scenarios_to_reset):
         if scenarios_to_reset is None:
@@ -84,38 +91,44 @@ class Phys_Engine:
     def _apply_model_action(self, action):
         """Applique l'action discrète du modèle à l'Open de la bougie courante."""
         action = action.to(dtype=torch.float32, device=self.device)
-        
-        self.raw_rotation = action[0] * 10 - 5
-        self.raw_trust = action[1] * 10
-        
-        self.rotation = (self.rotation + ) % 360
-        self.trust
+        alive = self.alive
 
-        thrust_angle_rad = math.radians(self.rotation)
-        self.velocity_x += math.sin(thrust_angle_rad) * self.config.THRUST_POWER
-        self.velocity_y += math.cos(thrust_angle_rad) * self.config.THRUST_POWER
-        
+        raw_rotation = action[:, 0] * self.Max_rotation - self.Max_rotation / 2
+        raw_thrust = torch.where(action[:, 1] > 0.05, action[:, 1] * self.Max_trust, 0.0)
+
+        thrust_angle_rad = torch.deg2rad(raw_rotation)
+        self.velocity_x[:self.alive] += torch.sin(thrust_angle_rad) * raw_thrust
+        self.velocity_y[:self.alive] += torch.cos(thrust_angle_rad) * raw_thrust - self.GRAVITY
+
         # Update position
-        self.x += self.velocity_x
-        self.y -= self.velocity_y
+        self.pos_x[:self.alive] += self.velocity_x
+        self.pos_x[:self.alive] += self.velocity_y
         
-        self.x = self.x % 998698
-        
-        # Wrap around screen horizontally
-        if self.x > self.config.SCREEN_WIDTH:
-            self.x = 0
-        elif self.x < 0:
-            self.x = self.config.SCREEN_WIDTH
-            
-    
-    
-    def _advance_env_step(self, ):
-        self.velocity_y -= self.config.GRAVITY
-        
-        # 5. Conditions de terminaison (Faillite et Truncation)
-        newly_bankrupt = (self.wallet <= (self.initial_wallet * (1.0 + self.bankruptcy_threshold))) & ~self.is_bankrupt
-        self.is_bankrupt = self.is_bankrupt | newly_bankrupt
+        self.pos_x[:self.alive] = self.pos_x % self.Max_width
 
-        terminated = self.is_bankrupt.clone()
-        truncated = (self.current_step >= self.episode_length)
-        return terminated, truncated
+        self.alive = torch.where(
+
+        )
+
+    def _apply_model_action(self, action):
+        action = action.to(dtype=torch.float32, device=self.device)
+        alive = self.alive  # tenseur bool (n,)
+
+        # Action -> commandes, une valeur par scénario
+        raw_rotation = action[:, 0] * self.Max_rotation - self.Max_rotation / 2
+        raw_thrust = torch.where(action[:, 1] > 0.05, action[:, 1] * self.Max_trust, 0.0)
+
+        # Nouvel état calculé pour tout le monde
+        new_rot = (self.rotation + raw_rotation) % 360
+        angle = torch.deg2rad(new_rot)
+        new_vx = self.velocity_x + torch.sin(angle) * raw_thrust
+        new_vy = self.velocity_y + torch.cos(angle) * raw_thrust - self.GRAVITY
+        new_x = (self.pos_x + new_vx) % self.Max_width
+        new_y = self.pos_y + new_vy
+
+        # On n'applique que pour les vivants
+        self.rotation   = torch.where(alive, new_rot, self.rotation)
+        self.velocity_x = torch.where(alive, new_vx, self.velocity_x)
+        self.velocity_y = torch.where(alive, new_vy, self.velocity_y)
+        self.pos_x      = torch.where(alive, new_x, self.pos_x)
+        self.pos_y      = torch.where(alive, new_y, self.pos_y)

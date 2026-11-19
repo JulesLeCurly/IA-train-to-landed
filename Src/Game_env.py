@@ -11,8 +11,8 @@ class GameConfig:
     """Game configuration constants"""
     SCREEN_WIDTH = 540
     SCREEN_HEIGHT = 540
-    GROUND_LEVEL = 76
-    PLAYER_SIZE = 10
+    GROUND_LEVEL = 70
+    PLAYER_SIZE = 15
 
     SCREEN_SCALE = 3
     
