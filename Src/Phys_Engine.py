@@ -7,18 +7,16 @@ class Phys_Engine:
     Env_Config,
     Spawn_pos,
     mode,
-    seed,
     device="cpu"
     ):
         self.device = torch.device(device) if isinstance(device, str) else device
         self.mode = mode
-        self.seed = seed
         self.Train_Config = Train_Config
         self.Env_Config = Env_Config
         self.Spawn_pos = Spawn_pos
 
         # Reproductibilité
-        self.seed = int(self.Train_Config["seed"]) if seed is None else int(seed)
+        self.seed = int(self.Train_Config["seed"])
         torch.manual_seed(self.seed)
 
         # Dimensions d'exécution (Validation stricte sans fallback)
@@ -66,7 +64,8 @@ class Phys_Engine:
         
         self.rotation = torch.zeros(n, dtype=torch.float32, device=dev)
 
-        self.alive = torch.zeros(n, dtype=torch.int8, device=dev)
+        self.alive = torch.ones(n, dtype=torch.bool, device=dev)
+        self.win = torch.zeros(n, dtype=torch.bool, device=dev)
     
     def reset(self, scenarios_to_reset):
         if scenarios_to_reset is None:
@@ -87,7 +86,11 @@ class Phys_Engine:
         self.velocity_x[idx] = torch.empty(n_reset, device=self.device).uniform_(-set_vel_x, set_vel_x)
         self.velocity_y[idx] = torch.empty(n_reset, device=self.device).uniform_(set_vel_y[0], set_vel_y[1])
         self.rotation[idx] = torch.empty(n_reset, device=self.device).uniform_(1, 360)
-    
+        
+        self.alive[idx] = True
+        self.win[idx] = False
+        
+        
     def _apply_model_action(self, action):
         """Applique l'action discrète du modèle à l'Open de la bougie courante."""
         action = action.to(dtype=torch.float32, device=self.device)
@@ -95,40 +98,30 @@ class Phys_Engine:
 
         raw_rotation = action[:, 0] * self.Max_rotation - self.Max_rotation / 2
         raw_thrust = torch.where(action[:, 1] > 0.05, action[:, 1] * self.Max_trust, 0.0)
+        
+        raw_rotation = raw_rotation[alive]
+        raw_thrust = raw_thrust[alive]
 
-        thrust_angle_rad = torch.deg2rad(raw_rotation)
-        self.velocity_x[:self.alive] += torch.sin(thrust_angle_rad) * raw_thrust
-        self.velocity_y[:self.alive] += torch.cos(thrust_angle_rad) * raw_thrust - self.GRAVITY
+        self.rotation[alive] = (self.rotation[alive] + raw_rotation) % 360
+        thrust_angle_rad = torch.deg2rad(self.rotation[alive])
+        
+        self.velocity_x[alive] += torch.sin(thrust_angle_rad) * raw_thrust
+        self.velocity_y[alive] += torch.cos(thrust_angle_rad) * raw_thrust - self.GRAVITY
 
         # Update position
-        self.pos_x[:self.alive] += self.velocity_x
-        self.pos_x[:self.alive] += self.velocity_y
+        self.pos_x[alive] += self.velocity_x[alive]
+        self.pos_y[alive] += self.velocity_y[alive]
         
-        self.pos_x[:self.alive] = self.pos_x % self.Max_width
+        self.pos_x[alive] = self.pos_x[alive] % self.Max_width
 
-        self.alive = torch.where(
+        has_touch = alive & (self.pos_y <= self.GROUND_LEVEL)
 
-        )
+        speed = torch.hypot(self.velocity_x, self.velocity_y)
+        tol = self.LANDING_ANGLE_TOLERANCE
 
-    def _apply_model_action(self, action):
-        action = action.to(dtype=torch.float32, device=self.device)
-        alive = self.alive  # tenseur bool (n,)
+        is_slow = speed < self.MAX_LANDING_SPEED
+        is_upright = (self.rotation > 360 - tol) | (self.rotation < tol)
 
-        # Action -> commandes, une valeur par scénario
-        raw_rotation = action[:, 0] * self.Max_rotation - self.Max_rotation / 2
-        raw_thrust = torch.where(action[:, 1] > 0.05, action[:, 1] * self.Max_trust, 0.0)
+        self.win = torch.where(has_touch, is_slow & is_upright, self.win)
 
-        # Nouvel état calculé pour tout le monde
-        new_rot = (self.rotation + raw_rotation) % 360
-        angle = torch.deg2rad(new_rot)
-        new_vx = self.velocity_x + torch.sin(angle) * raw_thrust
-        new_vy = self.velocity_y + torch.cos(angle) * raw_thrust - self.GRAVITY
-        new_x = (self.pos_x + new_vx) % self.Max_width
-        new_y = self.pos_y + new_vy
-
-        # On n'applique que pour les vivants
-        self.rotation   = torch.where(alive, new_rot, self.rotation)
-        self.velocity_x = torch.where(alive, new_vx, self.velocity_x)
-        self.velocity_y = torch.where(alive, new_vy, self.velocity_y)
-        self.pos_x      = torch.where(alive, new_x, self.pos_x)
-        self.pos_y      = torch.where(alive, new_y, self.pos_y)
+        self.alive = self.alive & ~has_touch
